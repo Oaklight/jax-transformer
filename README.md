@@ -9,7 +9,9 @@
     - einops: https://github.com/arogozhnikov/einops/
 - Jax:
     - Jax: https://jax.readthedocs.io/en/latest/index.html
+        - jax is "functional" https://jax.readthedocs.io/en/latest/jax-101/01-jax-basics.html#differences-from-numpy
     - Haiku: https://dm-haiku.readthedocs.io/en/latest/index.html
+        - Haiku101: Haiku库的基本使用逻辑 - 谷雨的文章 - 知乎 https://zhuanlan.zhihu.com/p/471892075
 - reference implementations I used yesterday:
     - haiku:
         this is cleaner but more functional & the transformer is not complete
