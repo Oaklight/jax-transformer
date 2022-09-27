@@ -4,7 +4,7 @@
 - einsum:
     - videos:
         - Youtube: https://youtu.be/ULY6pncbRY8
-        - Bilibili: https://www.bilibili.com/video/BV1ee411g7Sv?share_source=copy_web&vd_source=4b995a4a830cf8658351db7c6e2b0d08
+        - Bilibili: https://www.bilibili.com/video/BV1ee411g7Sv
     - code snippets: https://numpy.org/doc/stable/reference/generated/numpy.einsum.html
     - einops: https://github.com/arogozhnikov/einops/
 - Jax:
