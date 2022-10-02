@@ -9,6 +9,8 @@ import dataclasses
 
 import matplotlib.pyplot as plt
 
+
+
 class MultiHeadAttention(hk.Module):
     def __init__(
         self,
@@ -125,10 +127,6 @@ class PositionalEncoding(hk.initializers.Initializer):
         
         return pe
         
-        # print(type(x))
-        # x = x + self.pe[:, :x.size(1)]
-        # return hk.dropout(hk.next_rng_key(), self.dropout_rate, x)
-        
         
 class Embeddings(hk.Module):
     def __init__(
@@ -151,7 +149,12 @@ class Embeddings(hk.Module):
                 embedding_matrix=embedding_matrix
             )
         self.model_size = model_size
-
+    
+    def get_embedding_matrix(
+        self,
+    ) -> jnp.ndarray:
+        return self.embed.embeddings
+    
     def __call__(
         self,
         x: jnp.ndarray # shape [b, n]
@@ -169,7 +172,8 @@ class TransformerConfig:
     '''
     global hyperparameters used to minimize obnoxious kwarg plumbing
     '''
-    vocab_size: int
+    input_vocab_size: int
+    output_vocab_size: int
     model_size: int = 512
     num_heads: int = 8
     num_layers: int = 6
@@ -205,17 +209,35 @@ def layer_norm(x: jnp.ndarray) -> jnp.ndarray:
 class Encoder(hk.Module):
     config: TransformerConfig
     
+    def __post_init__(
+        self,
+    ):
+        super().__init__()
+        config = self.config
+        self.embedding = Embeddings(
+            model_size=config.model_size,
+            vocab_size=config.input_vocab_size,
+        )
+        
     def __call__(
         self,
-        src_embed: jnp.ndarray, # [b, n, embed_size], embed_size == model_size
+        inputs: jnp.ndarray, # [b, n]
         src_mask: Optional[jnp.ndarray] = None, # [b, 1, n, n]
         is_training: bool = True,
     ) -> jnp.ndarray:
         config = self.config
-        
         dropout_rate = config.dropout_rate if is_training else 0
+
+        # embedding the input sequence
+        seq_len = inputs.shape[-1]
+        pos_embed = hk.get_parameter("positional_embeddings", 
+                                     [seq_len, config.model_size],
+                                     init=PositionalEncoding())
+        h_embed = self.embedding(inputs.astype('int32')) + pos_embed
+        # we apply dropout to the sums of the embeddings and the positional encodings in both the encoder and decoder stacks
+        h_embed = hk.dropout(hk.next_rng_key(), dropout_rate, h_embed) # [b, n, embed_size], embed_size == model_size
         
-        h = src_embed
+        h = h_embed
         for _ in range(config.num_layers):
             
             # multi-head attention SUBLAYER
@@ -225,7 +247,10 @@ class Encoder(hk.Module):
                 model_size=config.model_size,
             )
             # We apply dropout to the output of each sub-layer, before it is added to the sub-layer input and normalized.
-            h_attn = attn_block(h, h, h, mask=src_mask) # [b, n, model_size]
+            h_attn = attn_block(h, 
+                                h, 
+                                h, 
+                                mask=src_mask) # [b, n, model_size]
             h_attn = hk.dropout(hk.next_rng_key(), dropout_rate, h_attn)
             h = layer_norm(h + h_attn)
             
@@ -248,19 +273,37 @@ class Encoder(hk.Module):
 class Decoder(hk.Module):
     config: TransformerConfig
     
+    def __post_init__(
+        self,
+    ):
+        super().__init__()
+        config = self.config
+        self.embedding = Embeddings(
+            model_size=config.model_size,
+            vocab_size=config.output_vocab_size,
+        )
+    
     def __call__(
         self,
-        tgt_embed: jnp.ndarray, # [b, n_q, embed_size], embed_size == model_size
-        src_encoded: jnp.ndarray, # [b, n_k, model_size], encoder output of src_embed
-        tgt_mask: Optional[jnp.ndarray] = None, # [b, 1, n_q, n_q]
-        tgt_src_mask: Optional[jnp.ndarray] = None, # [b, 1, n_q, n_k]
+        inputs: jnp.ndarray, # [b, n_k]
+        enc_outputs: jnp.ndarray, # [b, n_q, model_size], encoder output of src_embed
+        tgt_mask: Optional[jnp.ndarray] = None, # [b, 1, n_k, n_k]
+        tgt_src_mask: Optional[jnp.ndarray] = None, # [b, 1, n_k, n_q]
         is_training: bool = True,
     ) -> jnp.ndarray:
         config = self.config
-        
         dropout_rate = config.dropout_rate if is_training else 0
+
+        # embedding the input sequence
+        seq_len = inputs.shape[-1]
+        pos_embed = hk.get_parameter("positional_embeddings", 
+                                     [seq_len, config.model_size],
+                                     init=PositionalEncoding())
+        h_embed = self.embedding(inputs.astype('int32')) + pos_embed
+        # we apply dropout to the sums of the embeddings and the positional encodings in both the encoder and decoder stacks
+        h_embed = hk.dropout(hk.next_rng_key(), dropout_rate, h_embed) # [b, n_k, embed_size], embed_size == model_size
         
-        h = tgt_embed
+        h = h_embed # [b, n_k, embed_size]
         for _ in range(config.num_layers):
             
             # multi-head attention SUBLAYER
@@ -270,8 +313,11 @@ class Decoder(hk.Module):
                 model_size=config.model_size,
             )
             # We apply dropout to the output of each sub-layer, before it is added to the sub-layer input and normalized.
-            h_attn = attn_block(h, h, h, mask=tgt_mask)
-            h_attn = hk.dropout(hk.next_rng_key(), dropout_rate, h_attn)
+            h_attn = attn_block(h,
+                                h,
+                                h,
+                                mask=tgt_mask)
+            h_attn = hk.dropout(hk.next_rng_key(), dropout_rate, h_attn) # [b, n_k, model_size]
             h = layer_norm(h + h_attn)
             
             # multi-head cross attention SUBLAYER
@@ -281,8 +327,11 @@ class Decoder(hk.Module):
                 model_size=config.model_size,
             )
             # We apply dropout to the output of each sub-layer, before it is added to the sub-layer input and normalized.
-            h_attn = cross_attn_block(h, src_encoded, src_encoded, mask=tgt_src_mask)
-            h_attn = hk.dropout(hk.next_rng_key(), dropout_rate, h_attn)
+            h_attn = cross_attn_block(h, # [b, n_k, model_size]
+                                      enc_outputs, # [b, n_q, model_size]
+                                      enc_outputs, 
+                                      mask=tgt_src_mask)
+            h_attn = hk.dropout(hk.next_rng_key(), dropout_rate, h_attn) # [b, n_k, model_size]
             h = layer_norm(h + h_attn)
             
             # position-wise ffn SUBLAYER
@@ -292,12 +341,12 @@ class Decoder(hk.Module):
                 dropout_rate=config.dropout_rate,
             )
             # We apply dropout to the output of each sub-layer, before it is added to the sub-layer input and normalized.
-            h_dense = ffn_block(h) # [b, n, model_size]
+            h_dense = ffn_block(h) # [b, n_k, model_size]
             h_dense = hk.dropout(hk.next_rng_key(), dropout_rate, h_dense)
-            h = layer_norm(h + h_dense) # [b, n, model_size]
+            h = layer_norm(h + h_dense) # [b, n_k, model_size]
             
         return h
-    
+
 
 
 @dataclasses.dataclass
@@ -309,108 +358,50 @@ class Transformer(hk.Module):
         '''
         setup each components, embeddings is called on the fly
         '''
-        
         super().__init__() # for dataclass decorated modules, this still should be called manually
         config = self.config
         
-        key_size = config.model_size // config.num_heads
-                
         self.encoder = Encoder(config=config)
-        
         self.decoder = Decoder(config=config)
         
-        self.embed = Embeddings(
-            model_size=config.model_size,
-            vocab_size=config.vocab_size,
-        )
-        
         def generator(x: jnp.ndarray): # weight sharing between embeddings and the final linear layer
-            return jnp.dot(x, self.embed.embed.embeddings.T)
+            embedding_matrix = self.decoder.embedding.get_embedding_matrix()
+            return jnp.dot(x, embedding_matrix.T)
         
         self.generator = generator
         
-    def __embed(
-        self,
-        x: jnp.ndarray, # sequence of token_ids, shape [b, n]
-    ) -> jnp.ndarray:
-        seq_len = x.shape[-1]
-        pos_embed = hk.get_parameter("positional_embeddings", 
-                                     [seq_len, self.config.model_size],
-                                     init=PositionalEncoding())
-        x_embed = self.embed(x) + pos_embed
-        # we apply dropout to the sums of the embeddings and the positional encodings in both the encoder and decoder stacks
-        x_embed = hk.dropout(hk.next_rng_key(), self.config.dropout_rate, x_embed) # [b, n, embed_size], embed_size == model_size
-        return x_embed
-    
-    def encode(
-        self,
-        src_inputs: jnp.ndarray, # sequence of token_ids, shape [b, n], may contain padding token (usually 0)
-    ) -> jnp.ndarray:
-        dropout_rate = self.config.dropout_rate if self.is_training else 0
-        
-        # get combination of word & positional embedding
-        src_inputs = src_inputs.astype('int32')
-        src_embed = self.__embed(src_inputs) # shape [b, n] -> [b, n, embed_size], embed_size == model_size
-        # _, seq_len, model_size = src_embed.shape
-        # pos_embed = hk.get_parameter("positional_embeddings", [seq_len, model_size], init=PositionalEncoding())
-        # src_embed += pos_embed
-        # # we apply dropout to the sums of the embeddings and the positional encodings in both the encoder and decoder stacks
-        # src_embed = hk.dropout(hk.next_rng_key(), dropout_rate, src_embed) # [b, n, embed_size], embed_size == model_size
-        
-        # get mask
-        src_mask = jnp.einsum('bi, bj -> bij', src_inputs>0, src_inputs>0)[:, None, :] # shape [b, n] -> [b, n, n] -> [b, 1, n, n]
-        
-        return self.encoder(
-            src_embed=src_embed,
-            src_mask=src_mask,
-            is_training=self.is_training,
-        )
-    
-    def decode(
-        self,
-        tgt_inputs: jnp.ndarray, # sequence of token_ids, shape [b, n_q], may contain padding token (usually 0)
-        src_inputs: jnp.ndarray, # sequence of token_ids, shape [b, n_k], to get mask
-        src_encoded: jnp.ndarray, # shape [b, n_k, model_size]
-    ) -> jnp.ndarray:
-        dropout_rate = self.config.dropout_rate if self.is_training else 0
-                
-        # get combination of word & positional embedding
-        tgt_inputs = tgt_inputs.astype('int32')        
-        tgt_embed = self.__embed(tgt_inputs) # shape [b, n_q] -> [b, n_q, embed_size], embed_size == model_size
-        # _, seq_len, model_size = tgt_embed.shape
-        # pos_embed = hk.get_parameter("positional_embeddings", [seq_len, model_size], init=PositionalEncoding())
-        # tgt_embed += pos_embed
-        # # we apply dropout to the sums of the embeddings and the positional encodings in both the encoder and decoder stacks
-        # tgt_embed = hk.dropout(hk.next_rng_key(), dropout_rate, tgt_embed) # [b, n_q, embed_size], embed_size == model_size
-        
-        # get masks
-        tgt_src_mask = jnp.einsum('bi, bj -> bij', tgt_inputs>0, src_inputs>0)[:, None, :] # shape [b, n_q, n_k] -> [b, 1, n_q, n_k]
-        tgt_mask = jnp.einsum('bi, bj -> bij', tgt_inputs>0, tgt_inputs>0)[:, None, :] # shape [b, n_q] -> [b, n_q, n_q] -> [b, 1, n_q, n_q]
-        seq_len = tgt_embed.shape[-2]
-        causal_mask = np.tril(np.ones((1, 1, seq_len, seq_len))) # [1, 1, n_q, n_q]
-        tgt_mask = tgt_mask * causal_mask # jnp.einsum('...i, ...i -> ...i', seq, causal_mask)
-        
-        return self.decoder(
-            tgt_embed=tgt_embed,
-            src_encoded=src_encoded,
-            tgt_mask=tgt_mask,
-            tgt_src_mask=tgt_src_mask,
-            is_training=self.is_training,
-        )
-        
     def __call__(
         self,
-        src_inputs: jnp.ndarray,
-        tgt_inputs: jnp.ndarray,
+        src_inputs: jnp.ndarray, # [b, n_q]
+        tgt_inputs: jnp.ndarray, # [b, n_k]
         is_training: bool = True,
     ) -> jnp.ndarray:
         
         if is_training != self.is_training:
             self.is_training = is_training
         print(f'model is in {"training" if self.is_training else "evaluation"} mode.')
-            
-        encoded = self.encode(src_inputs) # shape [b, n, model_size]
-        decoded = self.decode(tgt_inputs, src_inputs, encoded) # shape [b, n, model_size]
-        # print(f"decoded shape: {decoded.shape}")
         
-        return self.generator(decoded) # shape [b, n, vocab_size]
+        # ============= encoder =============
+        src_mask = jnp.einsum('bi, bj -> bij', src_inputs>0, src_inputs>0)[:, None, :] # shape [b, n_q] -> [b, n_q, n_q] -> [b, 1, n_q, n_q]
+        
+        enc_outputs = self.encoder(
+            inputs=src_inputs,
+            src_mask=src_mask,
+            is_training=self.is_training,
+        ) # [b, n_q, model_size]
+        
+        # ============= decoder =============
+        tgt_mask = jnp.einsum('bi, bj -> bij', tgt_inputs>0, tgt_inputs>0)[:, None, :] # shape [b, n_k] -> [b, n_k, n_k] -> [b, 1, n_k, n_k]
+        causal_mask = np.tril(np.ones_like(tgt_mask)) # [b, 1, n_k, n_k]
+        tgt_mask = tgt_mask & causal_mask
+        tgt_src_mask = jnp.einsum('bi, bj -> bij', tgt_inputs>0, src_inputs>0)[:, None, :] # shape [b, n_k, n_q] -> [b, 1, n_k, n_q]
+        
+        dec_outputs = self.decoder(
+            inputs=tgt_inputs,
+            enc_outputs=enc_outputs,
+            tgt_mask=tgt_mask,
+            tgt_src_mask=tgt_src_mask,
+            is_training=self.is_training,
+        ) # [b, n_k, model_size]
+        
+        return self.generator(dec_outputs) # shape [b, n_k, vocab_size]
