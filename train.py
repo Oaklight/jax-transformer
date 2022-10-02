@@ -28,30 +28,25 @@ $ python3 examples/transformer/train.py \
     --dataset_path=/tmp/shakespeare.txt --alsologtostderr
 """
 
+import pickle
 import time
+from datetime import datetime
 from typing import Any, MutableMapping, NamedTuple, Tuple
 
-from absl import app
-from absl import flags
-from absl import logging
 import haiku as hk
 import jax
 import jax.numpy as jnp
 import numpy as np
 import optax
+from absl import app, flags, logging
+from datasets import load_dataset
+from tokenizers import Tokenizer
+from tqdm.autonotebook import tqdm
+from transformers import PreTrainedTokenizerFast
 
 import dataset
 import model
 
-from datasets import load_dataset
-from tqdm.autonotebook import tqdm
-
-from tokenizers import Tokenizer
-from transformers import PreTrainedTokenizerFast
-
-import pickle
-from datetime import datetime
-    
 IS_TRAINING = True
 
 LEARNING_RATE = 3e-4

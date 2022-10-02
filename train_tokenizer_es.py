@@ -1,6 +1,7 @@
+import os
+
 from datasets import load_dataset
 from tqdm.autonotebook import tqdm
-import os
 
 dataset = load_dataset("avacaondata/europarl_en_es_v2", split='train')
 # dataset = load_dataset("opus_books", "en-es", split='train')
@@ -8,16 +9,8 @@ def get_source_corpus():
     for i in range(0, len(dataset), 1000):
         yield dataset[i : i + 1000]["target_es"]
         
-from tokenizers import (
-    decoders,
-    models,
-    normalizers,
-    pre_tokenizers,
-    processors,
-    trainers,
-    Tokenizer,
-    Regex,
-)
+from tokenizers import (Regex, Tokenizer, decoders, models, normalizers,
+                        pre_tokenizers, processors, trainers)
 
 tokenizer = Tokenizer(models.Unigram())
 

@@ -1,14 +1,12 @@
+import dataclasses
+from typing import Any, Optional, Sequence
+
+import haiku as hk
 import jax
 import jax.numpy as jnp
-import numpy as np
-import haiku as hk
-from einops import rearrange, repeat
-
-from typing import Optional, Any, Sequence
-import dataclasses
-
 import matplotlib.pyplot as plt
-
+import numpy as np
+from einops import rearrange
 
 
 class MultiHeadAttention(hk.Module):
