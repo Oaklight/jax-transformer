@@ -406,10 +406,12 @@ class Transformer(hk.Module):
             _tgt_mask = jnp.einsum('bi, bj -> bij', tgt_inputs!=tgt_pad_token, tgt_inputs!=tgt_pad_token)[:, None, :] # shape [b, n_k] -> [b, n_k, n_k] -> [b, 1, n_k, n_k]
         else:
             _tgt_mask = jnp.einsum('bi, bj -> bij', tgt_mask, tgt_mask)[:, None, :] # shape [b, n_k] -> [b, n_k, n_k] -> [b, 1, n_k, n_k]
+            
         seq_len = tgt_inputs.shape[-1]
         # causal_mask = np.tril(np.ones_like(_tgt_mask)) # [b, 1, n_k, n_k]
         causal_mask = np.tril(np.ones((1, 1, seq_len, seq_len))) # [b, 1, n_k, n_k]
         _tgt_mask = _tgt_mask * causal_mask
+
         if tgt_mask is None:
             tgt_src_mask = jnp.einsum('bi, bj -> bij', tgt_inputs!=tgt_pad_token, src_inputs!=src_pad_token)[:, None, :] # shape [b, n_k, n_q] -> [b, 1, n_k, n_q]
         else:
@@ -418,7 +420,7 @@ class Transformer(hk.Module):
         dec_outputs = self.decoder(
             inputs=tgt_inputs,
             enc_outputs=enc_outputs,
-            tgt_mask=_tgt_mask if self.is_training else None,
+            tgt_mask=_tgt_mask,
             tgt_src_mask=tgt_src_mask,
             is_training=self.is_training,
         ) # [b, n_k, model_size]
