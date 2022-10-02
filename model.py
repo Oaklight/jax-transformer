@@ -179,6 +179,8 @@ class TransformerConfig:
     num_layers: int = 6
     hidden_size: int = 2048
     dropout_rate: float = 0.1
+    src_pad_token: int = 0
+    tgt_pad_token: int = 0
     
     def __post_init__(self):
         '''
@@ -374,32 +376,47 @@ class Transformer(hk.Module):
         self,
         src_inputs: jnp.ndarray, # [b, n_q]
         tgt_inputs: jnp.ndarray, # [b, n_k]
+        src_mask: Optional[jnp.ndarray] = None, # [b, n_q]
+        tgt_mask: Optional[jnp.ndarray] = None, # [b, n_k]
         is_training: bool = True,
     ) -> jnp.ndarray:
         
         if is_training != self.is_training:
             self.is_training = is_training
         print(f'model is in {"training" if self.is_training else "evaluation"} mode.')
+        src_pad_token = self.config.src_pad_token
+        tgt_pad_token = self.config.tgt_pad_token
         
         # ============= encoder =============
-        src_mask = jnp.einsum('bi, bj -> bij', src_inputs>0, src_inputs>0)[:, None, :] # shape [b, n_q] -> [b, n_q, n_q] -> [b, 1, n_q, n_q]
+        if src_mask is None:
+            _src_mask = jnp.einsum('bi, bj -> bij', src_inputs!=src_pad_token, src_inputs!=src_pad_token)[:, None, :] # shape [b, n_q] -> [b, n_q, n_q] -> [b, 1, n_q, n_q]
+        else:
+            _src_mask = jnp.einsum('bi, bj -> bij', src_mask, src_mask)[:, None, :] # shape [b, n_q] -> [b, n_q, n_q] -> [b, 1, n_q, n_q]
         
         enc_outputs = self.encoder(
             inputs=src_inputs,
-            src_mask=src_mask,
+            src_mask=_src_mask,
             is_training=self.is_training,
         ) # [b, n_q, model_size]
         
         # ============= decoder =============
-        tgt_mask = jnp.einsum('bi, bj -> bij', tgt_inputs>0, tgt_inputs>0)[:, None, :] # shape [b, n_k] -> [b, n_k, n_k] -> [b, 1, n_k, n_k]
-        causal_mask = np.tril(np.ones_like(tgt_mask)) # [b, 1, n_k, n_k]
-        tgt_mask = tgt_mask & causal_mask
-        tgt_src_mask = jnp.einsum('bi, bj -> bij', tgt_inputs>0, src_inputs>0)[:, None, :] # shape [b, n_k, n_q] -> [b, 1, n_k, n_q]
+        if tgt_mask is None:
+            _tgt_mask = jnp.einsum('bi, bj -> bij', tgt_inputs!=tgt_pad_token, tgt_inputs!=tgt_pad_token)[:, None, :] # shape [b, n_k] -> [b, n_k, n_k] -> [b, 1, n_k, n_k]
+        else:
+            _tgt_mask = jnp.einsum('bi, bj -> bij', tgt_mask, tgt_mask)[:, None, :] # shape [b, n_k] -> [b, n_k, n_k] -> [b, 1, n_k, n_k]
+        seq_len = tgt_inputs.shape[-1]
+        # causal_mask = np.tril(np.ones_like(_tgt_mask)) # [b, 1, n_k, n_k]
+        causal_mask = np.tril(np.ones((1, 1, seq_len, seq_len))) # [b, 1, n_k, n_k]
+        _tgt_mask = _tgt_mask * causal_mask
+        if tgt_mask is None:
+            tgt_src_mask = jnp.einsum('bi, bj -> bij', tgt_inputs!=tgt_pad_token, src_inputs!=src_pad_token)[:, None, :] # shape [b, n_k, n_q] -> [b, 1, n_k, n_q]
+        else:
+            tgt_src_mask = jnp.einsum('bi, bj -> bij', tgt_mask, src_mask)[:, None, :] # shape [b, n_k, n_q] -> [b, 1, n_k, n_q]
         
         dec_outputs = self.decoder(
             inputs=tgt_inputs,
             enc_outputs=enc_outputs,
-            tgt_mask=tgt_mask,
+            tgt_mask=_tgt_mask,
             tgt_src_mask=tgt_src_mask,
             is_training=self.is_training,
         ) # [b, n_k, model_size]
