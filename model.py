@@ -299,8 +299,10 @@ class Decoder(hk.Module):
         # embedding the input sequence
         seq_len = inputs.shape[-1]
         pos_embed = hk.get_parameter("positional_embeddings", 
-                                     [seq_len, config.model_size],
+                                     [enc_outputs.shape[-2], config.model_size],
                                      init=PositionalEncoding())
+        pos_embed = jax.lax.dynamic_slice(pos_embed,
+                                          (0, 0), (seq_len, config.model_size))
         h_embed = self.embedding(inputs.astype('int32')) + pos_embed
         # we apply dropout to the sums of the embeddings and the positional encodings in both the encoder and decoder stacks
         h_embed = hk.dropout(hk.next_rng_key(), dropout_rate, h_embed) # [b, n_k, embed_size], embed_size == model_size
@@ -383,7 +385,7 @@ class Transformer(hk.Module):
         
         if is_training != self.is_training:
             self.is_training = is_training
-        print(f'model is in {"training" if self.is_training else "evaluation"} mode.')
+        # print(f'model is in {"training" if self.is_training else "evaluation"} mode.')
         src_pad_token = self.config.src_pad_token
         tgt_pad_token = self.config.tgt_pad_token
         
@@ -416,7 +418,7 @@ class Transformer(hk.Module):
         dec_outputs = self.decoder(
             inputs=tgt_inputs,
             enc_outputs=enc_outputs,
-            tgt_mask=_tgt_mask,
+            tgt_mask=_tgt_mask if self.is_training else None,
             tgt_src_mask=tgt_src_mask,
             is_training=self.is_training,
         ) # [b, n_k, model_size]
