@@ -43,30 +43,52 @@ import optax
 import dataset
 import model
 
+from datasets import load_dataset
+from tqdm.autonotebook import tqdm
 
-DATASET_PATH = flags.DEFINE_string(
-    'dataset_path', None, help='Path to raw dataset file', required=True)
+from tokenizers import Tokenizer
+from transformers import PreTrainedTokenizerFast
 
-# Training hyperparameters.
-BATCH_SIZE = 2
-SEQUENCE_LENGTH = 64
+
+IS_TRAINING = True
+
 LEARNING_RATE = 3e-4
+SEQ_LENGTH = 512
 GRAD_CLIP_VALUE = 1
 LOG_EVERY = 50
 MAX_STEPS = 10**6
-SEED = 0
+SEED = 42
 
-# # Model hyperparameters.
-# NUM_LAYERS = 6
-# NUM_HEADS = 8  # Number of attention heads.
-# MODEL_SIZE = 256
-# KEY_SIZE = 32
-# DROPOUT_RATE = 0.1
 
-# Helpful type aliases.
-_Batch = dataset.Batch
-_Metrics = MutableMapping[str, Any]
 
+tokenizer_english = Tokenizer.from_file("vanilla-NMT/en/tokenizer.json")
+
+src_tokenizer = PreTrainedTokenizerFast(
+    tokenizer_object=tokenizer_english,
+    bos_token="<s>",
+    eos_token="</s>",
+    unk_token="<unk>",
+    pad_token="<pad>",
+    cls_token="<cls>",
+    sep_token="<sep>",
+    mask_token="<mask>",
+    padding_side="right",
+    truncation_side='right',
+)
+
+tokenizer_spanish = Tokenizer.from_file("vanilla-NMT/es/tokenizer.json")
+tgt_tokenizer = PreTrainedTokenizerFast(
+    tokenizer_object=tokenizer_spanish,
+    bos_token="<s>",
+    eos_token="</s>",
+    unk_token="<unk>",
+    pad_token="<pad>",
+    cls_token="<cls>",
+    sep_token="<sep>",
+    mask_token="<mask>",
+    padding_side="right",
+    truncation_side='right',
+)
 
 class TrainingState(NamedTuple):
     """Container for the training state."""
@@ -77,16 +99,43 @@ class TrainingState(NamedTuple):
 
 
 def main(_):
-    # TransformerConfig
-    configuration = model.TransformerConfig(
-        vocab_size=dataset.VOCAB_SIZE, # since we are using the ASCII
+    # we use streaming version of dataset
+    dataset = load_dataset("avacaondata/europarl_en_es_v2", split='train', streaming=True)
+
+    # encode function to map on each dataset entry
+    def encode(examples):
+        src_inputs = src_tokenizer(
+            examples['source_en'], 
+            truncation=True, max_length=SEQ_LENGTH, padding='max_length',
+            return_token_type_ids=False,
+            return_attention_mask=False,
+        )['input_ids']
+        tgt_inputs = tgt_tokenizer(
+            examples['target_es'], 
+            truncation=True, max_length=SEQ_LENGTH, padding='max_length',
+            return_token_type_ids=False,
+            return_attention_mask=False,
+        )['input_ids']
+        return {
+            'src_inputs': src_inputs,
+            'tgt_inputs': tgt_inputs,
+        }
+
+    # now dataset is a iter object
+    dataset = iter(dataset.map(encode, batched=True, remove_columns=["id", "source_en", "target_es", "__index_level_0__"]))
+    
+    # some training and model parameters:
+    CONFIG = model.TransformerConfig(
+        input_vocab_size=src_tokenizer.vocab_size,
+        output_vocab_size=tgt_tokenizer.vocab_size,
         model_size=256,
         num_heads=8,
         num_layers=6,
         hidden_size=512,
-        dropout_rate=0.1
+        dropout_rate=0.1,
+        src_pad_token=src_tokenizer.pad_token_id,
+        tgt_pad_token=tgt_tokenizer.pad_token_id,
     )
-    is_training = True
     
     # Create the model.
     def forward(
@@ -94,39 +143,43 @@ def main(_):
         tgt_inputs: jnp.ndarray,
         is_training: bool,
     ) -> jnp.ndarray:
-        
-        lm = model.Transformer(
-            config=configuration,
-            is_training=is_training,
-        )
-        return lm(src_inputs, tgt_inputs, is_training)
 
-    # Create the optimiser.
-    optimiser = optax.chain(
+        lm = model.Transformer(
+            config=CONFIG,
+            is_training=IS_TRAINING
+        )
+        return lm(src_inputs, tgt_inputs, is_training=is_training)
+    
+    optimizer = optax.chain(
         optax.clip_by_global_norm(GRAD_CLIP_VALUE),
         optax.adam(LEARNING_RATE, b1=0.9, b2=0.99),
     )
-
-    # Create the loss.
+    
     @hk.transform
-    def loss_fn(data: _Batch) -> jnp.ndarray:
-        """Computes the (scalar) LM loss on `data` w.r.t. params."""
-        logits = forward(data.inputs, data.inputs, is_training)
-        targets = jax.nn.one_hot(data.targets, dataset.VOCAB_SIZE)
+    def loss_fn(data) -> jnp.ndarray:
+        src_inputs = jnp.asarray(data['src_inputs'], dtype=jnp.int32)[None,:]
+        tgt_inputs = jnp.asarray(data['tgt_inputs'], dtype=jnp.int32)[None,:]
+
+        logits = forward(src_inputs, tgt_inputs, IS_TRAINING)
+        targets = jax.nn.one_hot(tgt_inputs, CONFIG.output_vocab_size)
         assert logits.shape == targets.shape
 
-        mask = jnp.greater(data.inputs, 0)
+        mask = jnp.greater(tgt_inputs, 0)
         log_likelihood = jnp.sum(targets * jax.nn.log_softmax(logits), axis=-1)
-        return -jnp.sum(log_likelihood * mask) / jnp.sum(mask)  # NLL per token.
+        return -jnp.sum(log_likelihood * mask) / jnp.sum(mask) # NLL per token
+    
+    _Metrics = MutableMapping[str, Any]
 
     @jax.jit
     def update(state: TrainingState, data) -> Tuple[TrainingState, _Metrics]:
-        """Does an SGD step and returns metrics."""
+        '''
+        Does an SGD step and return metrics
+        '''
         rng, new_rng = jax.random.split(state.rng)
         loss_and_grad_fn = jax.value_and_grad(loss_fn.apply)
         loss, gradients = loss_and_grad_fn(state.params, rng, data)
 
-        updates, new_opt_state = optimiser.update(gradients, state.opt_state)
+        updates, new_opt_state = optimizer.update(gradients, state.opt_state)
         new_params = optax.apply_updates(state.params, updates)
 
         new_state = TrainingState(
@@ -141,47 +194,33 @@ def main(_):
             'loss': loss,
         }
         return new_state, metrics
-
+    
     @jax.jit
     def init(rng: jnp.ndarray, data) -> TrainingState:
         rng, init_rng = jax.random.split(rng)
         initial_params = loss_fn.init(init_rng, data)
-        initial_opt_state = optimiser.init(initial_params)
+        initial_opt_state = optimizer.init(initial_params)
         return TrainingState(
             params=initial_params,
             opt_state=initial_opt_state,
             rng=rng,
             step=np.array(0),
         )
-
-    # Create the dataset.
-    with open(DATASET_PATH.value, mode='r') as file:
-        train_dataset = dataset.load_ascii_dataset(
-            corpus=file.read(),
-            batch_size=BATCH_SIZE,
-            sequence_length=SEQUENCE_LENGTH,
-        )
-
-    # Initialise the model parameters.
+    
     rng = jax.random.PRNGKey(SEED)
-    data = next(train_dataset)
+    data = next(dataset)
     state = init(rng, data)
 
-    # Start training (note we don't include any explicit eval in this example).
     prev_time = time.time()
     for step in range(MAX_STEPS):
-        data = next(train_dataset)
+        data = next(dataset)
         state, metrics = update(state, data)
-        # We use JAX runahead to mask data preprocessing and JAX dispatch overheads.
-        # Using values from state/metrics too often will block the runahead and can
-        # cause these overheads to become more prominent.
         if step % LOG_EVERY == 0:
-            steps_per_sec = LOG_EVERY / (time.time() - prev_time)
+            step_per_sec = LOG_EVERY / (time.time() - prev_time)
             prev_time = time.time()
-            metrics |= {'steps_per_sec': steps_per_sec}
+            metrics |= {'step_per_sec': step_per_sec}
             logging.info({k: float(v) for k, v in metrics.items()})
-
-
-
+        
+        
 if __name__ == '__main__':
     app.run(main)
