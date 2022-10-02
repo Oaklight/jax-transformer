@@ -49,14 +49,16 @@ from tqdm.autonotebook import tqdm
 from tokenizers import Tokenizer
 from transformers import PreTrainedTokenizerFast
 
-
+import pickle
+from datetime import datetime
+    
 IS_TRAINING = True
 
 LEARNING_RATE = 3e-4
 SEQ_LENGTH = 512
 GRAD_CLIP_VALUE = 1
 LOG_EVERY = 50
-MAX_STEPS = 10**6
+MAX_STEPS = 2000
 SEED = 42
 
 
@@ -104,14 +106,19 @@ def main(_):
 
     # encode function to map on each dataset entry
     def encode(examples):
+        def decorate(text, tokenizer):
+            decorated = f"{tokenizer.bos_token} {text} {tokenizer.eos_token}"
+            decorated = decorated.replace('\n', tokenizer.sep_token)
+            return decorated
+
         src_inputs = src_tokenizer(
-            examples['source_en'], 
+            decorate(examples['source_en'], src_tokenizer), 
             truncation=True, max_length=SEQ_LENGTH, padding='max_length',
             return_token_type_ids=False,
             return_attention_mask=False,
         )['input_ids']
         tgt_inputs = tgt_tokenizer(
-            examples['target_es'], 
+            decorate(examples['target_es'], tgt_tokenizer),
             truncation=True, max_length=SEQ_LENGTH, padding='max_length',
             return_token_type_ids=False,
             return_attention_mask=False,
@@ -122,7 +129,7 @@ def main(_):
         }
 
     # now dataset is a iter object
-    dataset = iter(dataset.map(encode, batched=True, remove_columns=["id", "source_en", "target_es", "__index_level_0__"]))
+    dataset = iter(dataset.map(encode, remove_columns=["id", "source_en", "target_es", "__index_level_0__"]))
     
     # some training and model parameters:
     CONFIG = model.TransformerConfig(
@@ -146,7 +153,7 @@ def main(_):
 
         lm = model.Transformer(
             config=CONFIG,
-            is_training=IS_TRAINING
+            is_training=is_training
         )
         return lm(src_inputs, tgt_inputs, is_training=is_training)
     
@@ -160,11 +167,11 @@ def main(_):
         src_inputs = jnp.asarray(data['src_inputs'], dtype=jnp.int32)[None,:]
         tgt_inputs = jnp.asarray(data['tgt_inputs'], dtype=jnp.int32)[None,:]
 
-        logits = forward(src_inputs, tgt_inputs, IS_TRAINING)
-        targets = jax.nn.one_hot(tgt_inputs, CONFIG.output_vocab_size)
+        logits = forward(src_inputs, tgt_inputs[:, :-1], IS_TRAINING)
+        targets = jax.nn.one_hot(tgt_inputs[:, 1:], CONFIG.output_vocab_size)
         assert logits.shape == targets.shape
 
-        mask = jnp.greater(tgt_inputs, 0)
+        mask = jnp.greater(tgt_inputs[:, :-1], 0)
         log_likelihood = jnp.sum(targets * jax.nn.log_softmax(logits), axis=-1)
         return -jnp.sum(log_likelihood * mask) / jnp.sum(mask) # NLL per token
     
@@ -176,7 +183,7 @@ def main(_):
         Does an SGD step and return metrics
         '''
         rng, new_rng = jax.random.split(state.rng)
-        loss_and_grad_fn = jax.value_and_grad(loss_fn.apply)
+        loss_and_grad_fn = jax.is_training(loss_fn.apply)
         loss, gradients = loss_and_grad_fn(state.params, rng, data)
 
         updates, new_opt_state = optimizer.update(gradients, state.opt_state)
@@ -220,7 +227,20 @@ def main(_):
             prev_time = time.time()
             metrics |= {'step_per_sec': step_per_sec}
             logging.info({k: float(v) for k, v in metrics.items()})
-        
+    
+
+    dateTimeObj = datetime.now()
+    timestampStr = dateTimeObj.strftime("%d-%b-%Y (%H:%M:%S)")
+
+    ckpt_file = f'ckpt/state_{timestampStr}.pickle'
+    
+    # Store data (serialize)
+    with open(ckpt_file, 'wb') as handle:
+        pickle.dump(state, handle, protocol=pickle.HIGHEST_PROTOCOL)
+
+    # # Load data (deserialize)
+    # with open(ckpt_file, 'rb') as handle:
+    #     unserialized_data = pickle.load(handle)
         
 if __name__ == '__main__':
     app.run(main)
