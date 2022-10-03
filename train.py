@@ -178,7 +178,7 @@ def main(_):
         Does an SGD step and return metrics
         '''
         rng, new_rng = jax.random.split(state.rng)
-        loss_and_grad_fn = jax.is_training(loss_fn.apply)
+        loss_and_grad_fn = jax.value_and_grad(loss_fn.apply)
         loss, gradients = loss_and_grad_fn(state.params, rng, data)
 
         updates, new_opt_state = optimizer.update(gradients, state.opt_state)
